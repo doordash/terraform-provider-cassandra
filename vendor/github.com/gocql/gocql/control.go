@@ -116,7 +116,7 @@ func hostInfo(addr string, defaultPort int) ([]*HostInfo, error) {
 
 	// Check if host is a literal IP address
 	if ip := net.ParseIP(host); ip != nil {
-		hosts = append(hosts, &HostInfo{connectAddress: ip, port: port})
+		hosts = append(hosts, &HostInfo{hostname: host, connectAddress: ip, port: port})
 		return hosts, nil
 	}
 
@@ -142,21 +142,21 @@ func hostInfo(addr string, defaultPort int) ([]*HostInfo, error) {
 	}
 
 	for _, ip := range ips {
-		hosts = append(hosts, &HostInfo{connectAddress: ip, port: port})
+		hosts = append(hosts, &HostInfo{hostname: host, connectAddress: ip, port: port})
 	}
 
 	return hosts, nil
 }
 
 func shuffleHosts(hosts []*HostInfo) []*HostInfo {
-	mutRandr.Lock()
-	perm := randr.Perm(len(hosts))
-	mutRandr.Unlock()
 	shuffled := make([]*HostInfo, len(hosts))
+	copy(shuffled, hosts)
 
-	for i, host := range hosts {
-		shuffled[perm[i]] = host
-	}
+	mutRandr.Lock()
+	randr.Shuffle(len(hosts), func(i, j int) {
+		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+	})
+	mutRandr.Unlock()
 
 	return shuffled
 }
@@ -166,10 +166,13 @@ func (c *controlConn) shuffleDial(endpoints []*HostInfo) (*Conn, error) {
 	// node.
 	shuffled := shuffleHosts(endpoints)
 
+	cfg := *c.session.connCfg
+	cfg.disableCoalesce = true
+
 	var err error
 	for _, host := range shuffled {
 		var conn *Conn
-		conn, err = c.session.connect(host, c)
+		conn, err = c.session.dial(host, &cfg, c)
 		if err == nil {
 			return conn, nil
 		}
@@ -386,7 +389,10 @@ func (c *controlConn) HandleError(conn *Conn, err error, closed bool) {
 	}
 
 	oldConn := c.getConn()
-	if oldConn.conn != conn {
+
+	// If connection has long gone, and not been attempted for awhile,
+	// it's possible to have oldConn as nil here (#1297).
+	if oldConn != nil && oldConn.conn != conn {
 		return
 	}
 
